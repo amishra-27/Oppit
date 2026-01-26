@@ -5,7 +5,8 @@ export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 function isUuid(v: string) {
-  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(v);
+  // Lenient UUID check - allows any hex in variant position
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(v);
 }
 
 function getFreshnessSeconds() {
@@ -17,9 +18,9 @@ function getFreshnessSeconds() {
 
 export async function GET(
   _req: Request,
-  { params }: { params: { plantId: string } }
+  { params }: { params: Promise<{ plantId: string }> }
 ) {
-  const { plantId } = params;
+  const { plantId } = await params;
 
   if (!isUuid(plantId)) {
     return NextResponse.json({ error: "Invalid plantId" }, { status: 400 });

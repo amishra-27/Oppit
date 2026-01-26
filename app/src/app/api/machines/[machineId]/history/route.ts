@@ -8,7 +8,8 @@ type Metric = "rpm" | "temperature" | "vibration" | "amps";
 const METRICS: Metric[] = ["rpm", "temperature", "vibration", "amps"];
 
 function isUuid(v: string) {
-  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(v);
+  // Lenient UUID check - allows any hex in variant position
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(v);
 }
 
 function parseIsoOrNull(v: string | null) {
@@ -17,8 +18,11 @@ function parseIsoOrNull(v: string | null) {
   return Number.isNaN(d.getTime()) ? null : d;
 }
 
-export async function GET(req: Request, { params }: { params: { machineId: string } }) {
-  const { machineId } = params;
+export async function GET(
+  req: Request,
+  { params }: { params: Promise<{ machineId: string }> }
+) {
+  const { machineId } = await params;
 
   if (!isUuid(machineId)) {
     return NextResponse.json({ error: "Invalid machineId" }, { status: 400 });

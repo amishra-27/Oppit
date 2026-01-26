@@ -1,5 +1,1 @@
-create policy "readings_select_anon"
-on public.readings
-for select
-to anon
-using (true);
+ALTER PUBLICATION supabase_realtime ADD TABLE public.readings;
