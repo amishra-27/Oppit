@@ -1,7 +1,11 @@
+-- supabase/seed.sql
 create extension if not exists pgcrypto;
 
 do $$
 declare
+  v_company_id uuid := 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa';  
+  v_user_id uuid; 
+
   v_plant_id uuid := '11111111-1111-1111-1111-111111111111';
 
   v_machine_id uuid;
@@ -10,9 +14,15 @@ declare
   v_key_plain text;
   v_key_hash  text;
 begin
-  insert into public.plants (id, name)
-  values (v_plant_id, 'Plant A')
+  insert into public.companies (id, name)
+  values (v_company_id, 'Demo Company')
   on conflict (id) do update set name = excluded.name;
+
+  insert into public.plants (id, name, company_id)
+  values (v_plant_id, 'Plant A', v_company_id)
+  on conflict (id) do update set
+    name = excluded.name,
+    company_id = excluded.company_id;
 
   for v_machine_name, v_machine_id, v_primary_metric in
     select *
@@ -43,7 +53,16 @@ begin
     insert into public.machine_api_keys (machine_id, key_hash, is_active)
     values (v_machine_id, v_key_hash, true);
 
-    raise notice 'API KEY : machine_name=% machine_id=% key=%',
+    raise notice 'API KEY: machine_name=% machine_id=% key=%',
       v_machine_name, v_machine_id, v_key_plain;
   end loop;
+
+  -- 4) Optional (recommended): after you create a user via Supabase Auth,
+  -- add them as owner so RLS works for dashboard reads.
+  -- You can run this later in SQL editor once you know your auth user id:
+  --
+  -- insert into public.company_members(company_id, user_id, role)
+  -- values (v_company_id, '<YOUR_AUTH_USER_UUID>'::uuid, 'owner')
+  -- on conflict do nothing;
+
 end $$;
