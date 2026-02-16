@@ -5,8 +5,21 @@ import { useState, useCallback, Suspense, useEffect } from "react";
 import useSWR, { mutate } from "swr";
 import Link from "next/link";
 import { useReadingsRealtime } from "@/app/hooks/useReadingsRealtime";
+import MachineMetricsSummary from "@/app/components/analytics/MachineMetricsSummary";
+import type { MetricsSummaryData } from "@/app/components/analytics/MachineMetricsSummary";
+import MachineStateTimeline from "@/app/components/analytics/MachineStateTimeline";
+import type { TimelineSegment } from "@/app/lib/analytics/types";
 
 type HistoryPoint = { ts_server: string; value: number };
+
+type MetricsResponse = {
+  machine_id: string;
+  from: string;
+  to: string;
+  summary: MetricsSummaryData | null;
+  timeline: TimelineSegment[];
+  error?: string;
+};
 
 type HistoryResponse = {
   machine_id: string;
@@ -18,7 +31,15 @@ type HistoryResponse = {
 };
 
 const fetcher = (url: string) =>
-  fetch(url, { cache: "no-store" }).then((r) => r.json());
+  fetch(url, { cache: "no-store" }).then(async (r) => {
+    const json = await r.json();
+    if (!r.ok) {
+      const err = new Error(json.error ?? `HTTP ${r.status}`);
+      (err as Error & { status: number }).status = r.status;
+      throw err;
+    }
+    return json;
+  });
 
 const TIME_RANGES = [
   { label: "15m", minutes: 15 },
@@ -556,6 +577,21 @@ function MachineDetailContent() {
     dedupingInterval: 0,
   });
 
+  // ── Metrics SWR (summary + timeline) — same time range ──
+  const metricsKey = `/api/machines/${machineId}/metrics?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`;
+
+  const {
+    data: metricsData,
+    error: metricsError,
+    isLoading: metricsLoading,
+  } = useSWR<MetricsResponse>(metricsKey, fetcher, {
+    refreshInterval: 5000,
+    revalidateOnFocus: true,
+    revalidateOnReconnect: true,
+    keepPreviousData: true,
+    dedupingInterval: 0,
+  });
+
   // Force time bounds to update on each poll
   useEffect(() => {
     const interval = setInterval(() => {
@@ -568,12 +604,54 @@ function MachineDetailContent() {
   const onInsert = useCallback(() => {
     setRefreshTick(t => t + 1);
     mutate(swrKey);
+    mutate(metricsKey);
     if (plantId) {
       mutate(`/api/plants/${plantId}/cards`);
     }
-  }, [swrKey, plantId]);
+  }, [swrKey, metricsKey, plantId]);
 
-  useReadingsRealtime(machineId, onInsert);
+  const realtimeStatus = useReadingsRealtime(machineId, onInsert);
+
+  // ── Unauthorized / not found ──
+  const httpStatus = (error as Error & { status?: number })?.status;
+
+  if (httpStatus === 401) {
+    return (
+      <div className="min-h-screen flex flex-col items-center justify-center bg-zinc-50 dark:bg-black text-center gap-4">
+        <div className="w-16 h-16 rounded-2xl bg-red-500/10 flex items-center justify-center">
+          <svg xmlns="http://www.w3.org/2000/svg" className="w-8 h-8 text-red-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+            <path strokeLinecap="round" strokeLinejoin="round" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
+          </svg>
+        </div>
+        <h2 className="text-lg font-semibold text-zinc-200">Unauthorized</h2>
+        <p className="text-sm text-zinc-500 max-w-sm">
+          You don&apos;t have access to this machine. It may belong to a different company.
+        </p>
+        <Link href="/" className="text-sm text-emerald-400 hover:text-emerald-300 transition-colors mt-2">
+          ← Back to dashboard
+        </Link>
+      </div>
+    );
+  }
+
+  if (httpStatus === 404) {
+    return (
+      <div className="min-h-screen flex flex-col items-center justify-center bg-zinc-50 dark:bg-black text-center gap-4">
+        <div className="w-16 h-16 rounded-2xl bg-zinc-800 flex items-center justify-center">
+          <svg xmlns="http://www.w3.org/2000/svg" className="w-8 h-8 text-zinc-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+            <path strokeLinecap="round" strokeLinejoin="round" d="M9.172 16.172a4 4 0 015.656 0M9 10h.01M15 10h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+          </svg>
+        </div>
+        <h2 className="text-lg font-semibold text-zinc-200">Machine not found</h2>
+        <p className="text-sm text-zinc-500 max-w-sm">
+          This machine doesn&apos;t exist or you don&apos;t have access.
+        </p>
+        <Link href="/" className="text-sm text-emerald-400 hover:text-emerald-300 transition-colors mt-2">
+          ← Back to dashboard
+        </Link>
+      </div>
+    );
+  }
 
   const latestPoint = data?.points?.length ? data.points[data.points.length - 1] : null;
   const currentTs = latestPoint?.ts_server ?? null;
@@ -587,22 +665,38 @@ function MachineDetailContent() {
     <div className="min-h-screen bg-zinc-50 dark:bg-black">
       <header className="border-b border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-950 px-6 py-4">
         <div className="max-w-4xl mx-auto flex items-center gap-3">
-          {plantId && (
-            <Link
-              href={`/plants/${plantId}`}
-              className="p-2 -ml-2 rounded-lg text-zinc-400 hover:text-zinc-600 hover:bg-zinc-100 dark:hover:text-zinc-300 dark:hover:bg-zinc-800 transition-colors"
-            >
-              <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
-              </svg>
-            </Link>
-          )}
-          <div>
+          <Link
+            href={plantId ? `/plants/${plantId}` : "/"}
+            className="p-2 -ml-2 rounded-lg text-zinc-400 hover:text-zinc-600 hover:bg-zinc-100 dark:hover:text-zinc-300 dark:hover:bg-zinc-800 transition-colors"
+          >
+            <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
+            </svg>
+          </Link>
+          <div className="flex-1 min-w-0">
             <h1 className="text-xl font-semibold">Machine Detail</h1>
             <p className="text-sm text-zinc-500 dark:text-zinc-400 mt-0.5">
               {data?.metric?.toUpperCase() ?? "Loading..."} • Live
             </p>
           </div>
+
+          {/* Realtime status chip */}
+          {realtimeStatus === "connected" ? (
+            <span className="inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-[11px] font-medium bg-emerald-500/10 text-emerald-500 border border-emerald-500/20">
+              <span className="h-1.5 w-1.5 rounded-full bg-emerald-500 animate-pulse" />
+              Connected
+            </span>
+          ) : realtimeStatus === "connecting" ? (
+            <span className="inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-[11px] font-medium bg-amber-500/10 text-amber-500 border border-amber-500/20">
+              <span className="h-1.5 w-1.5 rounded-full bg-amber-500 animate-pulse" />
+              Reconnecting
+            </span>
+          ) : (
+            <span className="inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-[11px] font-medium bg-zinc-500/10 text-zinc-400 border border-zinc-700" title="Realtime unavailable — data updates via polling every 5s">
+              <span className="h-1.5 w-1.5 rounded-full bg-zinc-500" />
+              Polling fallback
+            </span>
+          )}
         </div>
       </header>
 
@@ -650,6 +744,42 @@ function MachineDetailContent() {
               </p>
             </div>
           </div>
+        </div>
+
+        {/* Metrics Summary */}
+        <div className="mb-6">
+          <h2 className="text-sm font-medium text-zinc-600 dark:text-zinc-300 mb-3">
+            Performance Summary
+          </h2>
+          <MachineMetricsSummary
+            data={metricsData?.summary ?? null}
+            isLoading={metricsLoading}
+            error={metricsError ? (metricsError as Error).message : (metricsData?.error ?? null)}
+          />
+        </div>
+
+        {/* State Timeline */}
+        <div className="mb-6">
+          <h2 className="text-sm font-medium text-zinc-600 dark:text-zinc-300 mb-3">
+            Machine State
+          </h2>
+          {metricsLoading ? (
+            <div className="h-8 rounded-md bg-zinc-800 animate-pulse" />
+          ) : metricsError || metricsData?.error ? (
+            <div className="rounded-xl border border-red-500/20 bg-red-500/5 px-4 py-3 text-sm text-red-400">
+              Failed to load timeline
+            </div>
+          ) : (metricsData?.timeline?.length ?? 0) > 0 ? (
+            <MachineStateTimeline
+              segments={metricsData!.timeline}
+              from={from}
+              to={to}
+            />
+          ) : (
+            <div className="rounded-xl border border-dashed border-zinc-800 px-4 py-3 text-center text-sm text-zinc-500">
+              No state data for this time range.
+            </div>
+          )}
         </div>
 
         {/* Chart controls */}

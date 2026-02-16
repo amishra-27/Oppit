@@ -1,29 +1,34 @@
 -- supabase/seed.sql
+-- Idempotent: safe to run repeatedly via `supabase db reset` or manually.
+-- Does NOT touch auth.users — manage users through Supabase Auth.
+-- The trg_set_machine_company_id trigger auto-sets machines.company_id from plants.
+
 create extension if not exists pgcrypto;
 
 do $$
 declare
-  v_company_id uuid := 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa';  
-  v_user_id uuid; 
+  v_company_id uuid := 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa';
+  v_plant_id   uuid := '11111111-1111-1111-1111-111111111111';
 
-  v_plant_id uuid := '11111111-1111-1111-1111-111111111111';
-
-  v_machine_id uuid;
-  v_machine_name text;
-  v_primary_metric text;
-  v_key_plain text;
-  v_key_hash  text;
+  v_machine_id      uuid;
+  v_machine_name    text;
+  v_primary_metric  text;
+  v_key_plain       text;
+  v_key_hash        text;
 begin
+  -- 1) Company: CH Ellis (demo company)
   insert into public.companies (id, name)
-  values (v_company_id, 'Demo Company')
+  values (v_company_id, 'CH Ellis')
   on conflict (id) do update set name = excluded.name;
 
+  -- 2) Plant A, attached to CH Ellis
   insert into public.plants (id, name, company_id)
   values (v_plant_id, 'Plant A', v_company_id)
   on conflict (id) do update set
-    name = excluded.name,
+    name       = excluded.name,
     company_id = excluded.company_id;
 
+  -- 3) Machines — trigger trg_set_machine_company_id sets company_id automatically
   for v_machine_name, v_machine_id, v_primary_metric in
     select *
     from (values
@@ -35,11 +40,12 @@ begin
     insert into public.machines (id, plant_id, name, line, primary_metric)
     values (v_machine_id, v_plant_id, v_machine_name, 'Line 1', v_primary_metric)
     on conflict (id) do update set
-      plant_id = excluded.plant_id,
-      name = excluded.name,
-      line = excluded.line,
+      plant_id       = excluded.plant_id,
+      name           = excluded.name,
+      line           = excluded.line,
       primary_metric = excluded.primary_metric;
 
+    -- 4) Machine API keys (delete + re-insert for idempotency)
     v_key_plain := case v_machine_name
       when 'Machine 01' then 'e771af0507dae39eae3c4671f49ef5886b7db7bdc1842fe1'
       when 'Machine 02' then 'e88e3be43be5da6e36945dee6fae1ab8bb068936be3f9fbb'
@@ -57,12 +63,21 @@ begin
       v_machine_name, v_machine_id, v_key_plain;
   end loop;
 
-  -- 4) Optional (recommended): after you create a user via Supabase Auth,
-  -- add them as owner so RLS works for dashboard reads.
-  -- You can run this later in SQL editor once you know your auth user id:
+  -- 5) Simulator control rows (idempotent)
+  insert into public.sim_control (id, enabled)
+  values (1, false)
+  on conflict (id) do nothing;
+
+  insert into public.sim_tick (id, t)
+  values (1, 0)
+  on conflict (id) do nothing;
+
+  -- 6) Company membership:
+  --    After you sign up via Supabase Auth, run this once in SQL editor
+  --    to link your user to CH Ellis as owner so RLS lets you see data:
   --
-  -- insert into public.company_members(company_id, user_id, role)
-  -- values (v_company_id, '<YOUR_AUTH_USER_UUID>'::uuid, 'owner')
-  -- on conflict do nothing;
+  --    insert into public.company_members (company_id, user_id, role)
+  --    values ('aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa', '<YOUR_AUTH_USER_UUID>', 'owner')
+  --    on conflict do nothing;
 
 end $$;

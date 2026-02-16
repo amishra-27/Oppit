@@ -1,21 +1,18 @@
-// Follow this setup guide to integrate the Deno language server with your editor:
-// https://deno.land/manual/getting_started/setup_your_environment
-// This enables autocomplete, go to definition, etc.
+// Edge Function: ingest
+// Accepts machine readings authenticated via machine API key.
+// Key resolved from x-machine-key header or Authorization: Bearer <key>.
+// Uses service-role key internally — does NOT rely on RLS.
 
-// Setup type definitions for built-in Supabase Runtime APIs
-import "jsr:@supabase/functions-js/edge-runtime.d.ts";
-import { createClient } from "npm:@supabase/supabase-js@2";
+import { createClient } from "@supabase/supabase-js";
 
 type Metric = "rpm" | "temperature" | "vibration" | "amps";
 
 type IngestBody = {
-  machine_id: string;
-
+  // Optional: if provided, must match the key's machine_id
+  machine_id?: string;
   device_ts?: string | null;
   value?: number;
-
   points?: Array<{ ts: string; value: number }>;
-
   readings?: Array<{ metric: Metric; value: number }>;
 };
 
@@ -25,7 +22,7 @@ function json(status: number, body: unknown) {
     headers: {
       "Content-Type": "application/json",
       "Access-Control-Allow-Origin": "*",
-      "Access-Control-Allow-Headers": "content-type,x-machine-key",
+      "Access-Control-Allow-Headers": "content-type,x-machine-key,authorization",
       "Access-Control-Allow-Methods": "POST,OPTIONS",
     },
   });
@@ -39,12 +36,35 @@ async function sha256Hex(input: string): Promise<string> {
     .join("");
 }
 
+/**
+ * Extract the machine API key from either:
+ *   1. x-machine-key header (preferred)
+ *   2. Authorization: Bearer <key>
+ */
+function extractKey(req: Request): string | null {
+  const machineKey = req.headers.get("x-machine-key");
+  if (machineKey) return machineKey;
+
+  const authHeader = req.headers.get("authorization");
+  if (authHeader) {
+    const match = authHeader.match(/^Bearer\s+(.+)$/i);
+    if (match) return match[1];
+  }
+
+  return null;
+}
+
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return json(200, { ok: true });
   if (req.method !== "POST") return json(405, { error: "Method not allowed" });
 
-  const machineKey = req.headers.get("x-machine-key");
-  if (!machineKey) return json(401, { error: "Missing x-machine-key header" });
+  // --- Authenticate via machine API key ---
+  const rawKey = extractKey(req);
+  if (!rawKey) {
+    return json(401, {
+      error: "Missing machine API key (x-machine-key header or Bearer token)",
+    });
+  }
 
   let body: IngestBody;
   try {
@@ -53,55 +73,80 @@ Deno.serve(async (req) => {
     return json(400, { error: "Invalid JSON" });
   }
 
-  if (!body.machine_id) return json(400, { error: "machine_id is required" });
-
   const supabaseUrl = Deno.env.get("SUPABASE_URL");
   const serviceRoleKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
   if (!supabaseUrl || !serviceRoleKey) {
-    return json(500, { error: "Missing SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY env vars" });
+    return json(500, {
+      error: "Missing SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY env vars",
+    });
   }
 
   const supabase = createClient(supabaseUrl, serviceRoleKey, {
     auth: { persistSession: false, autoRefreshToken: false },
   });
 
-  const keyHash = await sha256Hex(machineKey);
+  // --- Key lookup: hash → machine_api_keys → machines (join) ---
+  const keyHash = await sha256Hex(rawKey);
 
   const { data: keyRow, error: keyErr } = await supabase
     .from("machine_api_keys")
-    .select("id")
-    .eq("machine_id", body.machine_id)
+    .select("id, machine_id, machines(id, company_id, primary_metric)")
     .eq("key_hash", keyHash)
     .eq("is_active", true)
     .maybeSingle();
 
-  if (keyErr) return json(500, { error: "Key lookup failed", details: keyErr.message });
-  if (!keyRow) return json(403, { error: "Invalid or inactive machine key" });
+  if (keyErr) {
+    return json(500, { error: "Key lookup failed", details: keyErr.message });
+  }
+  if (!keyRow) {
+    return json(401, { error: "Invalid or inactive machine API key" });
+  }
 
-  const { data: machineRow, error: machineErr } = await supabase
-    .from("machines")
-    .select("primary_metric")
-    .eq("id", body.machine_id)
-    .maybeSingle();
+  // Supabase returns the joined row as an object (single FK)
+  const machine = keyRow.machines as unknown as {
+    id: string;
+    company_id: string;
+    primary_metric: Metric;
+  } | null;
 
-  if (machineErr) return json(500, { error: "Machine lookup failed", details: machineErr.message });
-  if (!machineRow) return json(404, { error: "Machine not found" });
+  if (!machine) {
+    return json(404, { error: "Machine not found for this API key" });
+  }
 
-  const primaryMetric = machineRow.primary_metric as Metric;
+  const machineId = machine.id;
+  const companyId = machine.company_id;
+  const primaryMetric = machine.primary_metric;
 
+  // If body includes machine_id, validate it matches the key
+  if (body.machine_id && body.machine_id !== machineId) {
+    return json(403, {
+      error: "machine_id in body does not match the API key's machine",
+    });
+  }
+
+  // --- Insert readings ---
+
+  // Mode 1: batch of timestamped points
   if (Array.isArray(body.points) && body.points.length > 0) {
     const rows = body.points.map((p) => ({
-      machine_id: body.machine_id,
+      machine_id: machineId,
       ts_device: p.ts,
       metric: primaryMetric,
       value: p.value,
     }));
 
     const { error: insErr } = await supabase.from("readings").insert(rows);
-    if (insErr) return json(500, { error: "Insert failed", details: insErr.message });
-    return json(200, { ok: true, inserted: rows.length });
+    if (insErr)
+      return json(500, { error: "Insert failed", details: insErr.message });
+    return json(200, {
+      ok: true,
+      inserted: rows.length,
+      machine_id: machineId,
+      company_id: companyId,
+    });
   }
 
+  // Mode 2: multi-metric readings array
   if (Array.isArray(body.readings) && body.readings.length > 0) {
     const bad = body.readings.find((r) => r.metric !== primaryMetric);
     if (bad) {
@@ -111,28 +156,41 @@ Deno.serve(async (req) => {
     }
 
     const rows = body.readings.map((r) => ({
-      machine_id: body.machine_id,
+      machine_id: machineId,
       ts_device: body.device_ts ?? null,
       metric: r.metric,
       value: r.value,
     }));
 
     const { error: insErr } = await supabase.from("readings").insert(rows);
-    if (insErr) return json(500, { error: "Insert failed", details: insErr.message });
-    return json(200, { ok: true, inserted: rows.length });
+    if (insErr)
+      return json(500, { error: "Insert failed", details: insErr.message });
+    return json(200, {
+      ok: true,
+      inserted: rows.length,
+      machine_id: machineId,
+      company_id: companyId,
+    });
   }
 
+  // Mode 3: single value
   if (typeof body.value === "number") {
     const row = {
-      machine_id: body.machine_id,
+      machine_id: machineId,
       ts_device: body.device_ts ?? null,
       metric: primaryMetric,
       value: body.value,
     };
 
     const { error: insErr } = await supabase.from("readings").insert([row]);
-    if (insErr) return json(500, { error: "Insert failed", details: insErr.message });
-    return json(200, { ok: true, inserted: 1 });
+    if (insErr)
+      return json(500, { error: "Insert failed", details: insErr.message });
+    return json(200, {
+      ok: true,
+      inserted: 1,
+      machine_id: machineId,
+      company_id: companyId,
+    });
   }
 
   return json(400, { error: "Provide points[], readings[], or value" });

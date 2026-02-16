@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { createClient } from "@supabase/supabase-js";
+import { createClient } from "@/lib/supabase/server";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -33,15 +33,20 @@ export async function GET(
   const fromParam = url.searchParams.get("from");
   const toParam = url.searchParams.get("to");
 
-  const supabaseUrl = process.env.SUPABASE_URL;
-  const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
-  if (!supabaseUrl || !serviceRoleKey) {
-    return NextResponse.json({ error: "Missing server env vars" }, { status: 500 });
-  }
+  // Use session-bound client — RLS enforces tenancy
+  const supabase = await createClient();
 
-  const supabase = createClient(supabaseUrl, serviceRoleKey, {
-    auth: { persistSession: false, autoRefreshToken: false },
-  });
+  const {
+    data: { user },
+    error: authError,
+  } = await supabase.auth.getUser();
+
+  if (authError || !user) {
+    return NextResponse.json(
+      { error: "Unauthorized" },
+      { status: 401, headers: { "Cache-Control": "no-store" } }
+    );
+  }
 
   const now = new Date();
   const from = parseIsoOrNull(fromParam) ?? new Date(now.getTime() - 15 * 60 * 1000);
@@ -59,6 +64,7 @@ export async function GET(
     }
     metric = metricParam as Metric;
   } else {
+    // RLS on machines ensures user can only see machines in their companies
     const { data: machineRow, error: mErr } = await supabase
       .from("machines")
       .select("primary_metric")
@@ -66,7 +72,10 @@ export async function GET(
       .maybeSingle();
 
     if (mErr) {
-      return NextResponse.json({ error: "Machine lookup failed", details: mErr.message }, { status: 500 });
+      return NextResponse.json(
+        { error: "Machine lookup failed", details: mErr.message },
+        { status: 500 }
+      );
     }
     if (!machineRow) {
       return NextResponse.json({ error: "Machine not found" }, { status: 404 });
@@ -75,6 +84,7 @@ export async function GET(
     metric = machineRow.primary_metric as Metric;
   }
 
+  // RLS on readings ensures user can only see readings for their machines
   const { data, error } = await supabase
     .from("readings")
     .select("ts_server,value")
@@ -91,11 +101,14 @@ export async function GET(
     );
   }
 
-  return NextResponse.json({
-    machine_id: machineId,
-    metric,
-    from: from.toISOString(),
-    to: to.toISOString(),
-    points: data ?? [],
-  });
+  return NextResponse.json(
+    {
+      machine_id: machineId,
+      metric,
+      from: from.toISOString(),
+      to: to.toISOString(),
+      points: data ?? [],
+    },
+    { headers: { "Cache-Control": "no-store" } }
+  );
 }
