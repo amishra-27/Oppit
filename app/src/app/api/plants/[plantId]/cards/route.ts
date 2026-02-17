@@ -55,8 +55,81 @@ export async function GET(
     );
   }
 
+  const machines = (data ?? []) as Array<{
+    machine_id: string;
+    machine_name: string;
+    primary_metric: string;
+    last_ts: string | null;
+    last_value: number | null;
+    is_fresh: boolean;
+    is_running: boolean;
+  }>;
+
+  if (machines.length === 0) {
+    return NextResponse.json(
+      { plant_id: plantId, freshness_seconds: freshnessSeconds, machines: [] },
+      { headers: { "Cache-Control": "no-store" } }
+    );
+  }
+
+  const machineIds = machines.map((m) => m.machine_id);
+
+  // Fetch line from machines table and group assignment in parallel.
+  // RLS on machines and machine_group_machines enforces tenancy.
+  const [linesResult, groupsResult] = await Promise.all([
+    supabase
+      .from("machines")
+      .select("id, line")
+      .in("id", machineIds),
+    supabase
+      .from("machine_group_machines")
+      .select("machine_id, machine_groups(id, name)")
+      .in("machine_id", machineIds)
+      .order("created_at", { ascending: true }),
+  ]);
+
+  // Build lookup: machine_id → line
+  const lineMap = new Map<string, string | null>();
+  if (linesResult.data) {
+    for (const row of linesResult.data) {
+      lineMap.set(row.id, row.line);
+    }
+  }
+
+  // Build lookup: machine_id → first group (deterministic by created_at asc)
+  const groupMap = new Map<string, { group_id: string; group_name: string }>();
+  if (groupsResult.data) {
+    for (const row of groupsResult.data) {
+      // Only keep the first group per machine (earliest created_at)
+      if (groupMap.has(row.machine_id)) continue;
+
+      const group = row.machine_groups as unknown as {
+        id: string;
+        name: string;
+      } | null;
+
+      if (group) {
+        groupMap.set(row.machine_id, {
+          group_id: group.id,
+          group_name: group.name,
+        });
+      }
+    }
+  }
+
+  // Merge metadata into each card
+  const enriched = machines.map((m) => {
+    const grp = groupMap.get(m.machine_id);
+    return {
+      ...m,
+      line: lineMap.get(m.machine_id) ?? null,
+      group_id: grp?.group_id ?? null,
+      group_name: grp?.group_name ?? null,
+    };
+  });
+
   return NextResponse.json(
-    { plant_id: plantId, freshness_seconds: freshnessSeconds, machines: data ?? [] },
+    { plant_id: plantId, freshness_seconds: freshnessSeconds, machines: enriched },
     { headers: { "Cache-Control": "no-store" } }
   );
 }

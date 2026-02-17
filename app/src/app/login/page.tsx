@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import { useRouter } from "next/navigation";
+import Link from "next/link";
 import { createClient } from "@/lib/supabase/client";
 
 type Mode = "password" | "magic-link";
@@ -100,8 +101,8 @@ export default function LoginPage() {
 
       {/* Card */}
       <div className="relative z-10 w-full max-w-md px-4">
-        {/* Logo */}
-        <div className="flex items-center justify-center gap-2 mb-8">
+        {/* Logo – links back to landing page */}
+        <Link href="/" className="flex items-center justify-center gap-2 mb-2 hover:opacity-80 transition-opacity">
           <div className="w-9 h-9 rounded-lg bg-gradient-to-br from-emerald-400 to-cyan-500 flex items-center justify-center">
             <svg
               xmlns="http://www.w3.org/2000/svg"
@@ -119,6 +120,14 @@ export default function LoginPage() {
             </svg>
           </div>
           <span className="text-2xl font-bold tracking-tight">Oppit</span>
+        </Link>
+        <div className="text-center mb-8">
+          <Link
+            href="/"
+            className="text-xs text-zinc-500 hover:text-zinc-300 transition-colors"
+          >
+            ← Back to landing page
+          </Link>
         </div>
 
         <div className="rounded-2xl bg-zinc-900/80 border border-zinc-800 p-8">
