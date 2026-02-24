@@ -72,7 +72,9 @@ export function useReadingsRealtime(
 
   // Stable ref for the callback so the channel doesn't re-subscribe on every render
   const onInsertRef = useRef(onInsert);
-  onInsertRef.current = onInsert;
+  useEffect(() => {
+    onInsertRef.current = onInsert;
+  }, [onInsert]);
 
   // Track active channel to guarantee cleanup even during rapid switches
   const channelRef = useRef<RealtimeChannel | null>(null);

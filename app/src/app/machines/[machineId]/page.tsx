@@ -9,6 +9,7 @@ import MachineMetricsSummary from "@/app/components/analytics/MachineMetricsSumm
 import type { MetricsSummaryData } from "@/app/components/analytics/MachineMetricsSummary";
 import MachineStateTimeline from "@/app/components/analytics/MachineStateTimeline";
 import type { TimelineSegment } from "@/app/lib/analytics/types";
+import ProvisionDeviceModal from "@/app/components/machines/ProvisionDeviceModal";
 
 type HistoryPoint = { ts_server: string; value: number };
 
@@ -368,7 +369,7 @@ function ReadingsChart({ points, metric }: { points: HistoryPoint[]; metric: str
 }
 
 // Time-based chart (original, improved)
-function TimeChart({ points, metric, rangeMinutes }: { points: HistoryPoint[]; metric: string; rangeMinutes: number }) {
+function TimeChart({ points, metric, fromIso, toIso }: { points: HistoryPoint[]; metric: string; fromIso: string; toIso: string }) {
   const [hoveredIndex, setHoveredIndex] = useState<number | null>(null);
   
   const width = 700;
@@ -388,10 +389,10 @@ function TimeChart({ points, metric, rangeMinutes }: { points: HistoryPoint[]; m
     );
   }
 
-  // Use the full time range window
-  const now = Date.now();
-  const windowStart = now - rangeMinutes * 60 * 1000;
-  
+  // Use the passed time-window bounds (no Date.now() in render)
+  const windowStart = new Date(fromIso).getTime();
+  const windowEnd = new Date(toIso).getTime();
+
   const values = points.map((p) => p.value);
   const minVal = Math.min(...values);
   const maxVal = Math.max(...values);
@@ -403,7 +404,7 @@ function TimeChart({ points, metric, rangeMinutes }: { points: HistoryPoint[]; m
 
   const timestamps = points.map((p) => new Date(p.ts_server).getTime());
 
-  const scaleX = (ts: number) => padding.left + ((ts - windowStart) / (now - windowStart)) * chartW;
+  const scaleX = (ts: number) => padding.left + ((ts - windowStart) / (windowEnd - windowStart)) * chartW;
   const scaleY = (val: number) => padding.top + chartH - ((val - yMin) / yRange) * chartH;
 
   const pathPoints = points.map((p, i) => {
@@ -424,7 +425,7 @@ function TimeChart({ points, metric, rangeMinutes }: { points: HistoryPoint[]; m
   };
 
   const timeLabels = [0, 0.5, 1].map((pct) => {
-    const ts = new Date(windowStart + (now - windowStart) * pct);
+    const ts = new Date(windowStart + (windowEnd - windowStart) * pct);
     return {
       x: padding.left + chartW * pct,
       label: ts.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
@@ -560,7 +561,8 @@ function MachineDetailContent() {
 
   const [rangeMinutes, setRangeMinutes] = useState(15);
   const [chartMode, setChartMode] = useState<"time" | "readings">("readings");
-  const [refreshTick, setRefreshTick] = useState(0);
+  const [, setRefreshTick] = useState(0);
+  const [provisionOpen, setProvisionOpen] = useState(false);
 
   // Compute fresh time bounds on each refresh tick
   const now = new Date();
@@ -679,6 +681,18 @@ function MachineDetailContent() {
               {data?.metric?.toUpperCase() ?? "Loading..."} • Live
             </p>
           </div>
+
+          {/* Provision device button */}
+          <button
+            type="button"
+            onClick={() => setProvisionOpen(true)}
+            className="inline-flex items-center gap-1.5 rounded-lg border border-zinc-700 px-3 py-1.5 text-xs font-medium text-zinc-400 hover:text-zinc-200 hover:border-zinc-500 transition-colors"
+          >
+            <svg xmlns="http://www.w3.org/2000/svg" className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+              <path strokeLinecap="round" strokeLinejoin="round" d="M15 7a2 2 0 012 2m4 0a6 6 0 01-7.743 5.743L11 17H9v2H7v2H4a1 1 0 01-1-1v-2.586a1 1 0 01.293-.707l5.964-5.964A6 6 0 1121 9z" />
+            </svg>
+            Provision device
+          </button>
 
           {/* Realtime status chip */}
           {realtimeStatus === "connected" ? (
@@ -843,10 +857,11 @@ function MachineDetailContent() {
           ) : chartMode === "readings" ? (
             <ReadingsChart points={data?.points ?? []} metric={data?.metric ?? ""} />
           ) : (
-            <TimeChart 
-              points={data?.points ?? []} 
-              metric={data?.metric ?? ""} 
-              rangeMinutes={rangeMinutes}
+            <TimeChart
+              points={data?.points ?? []}
+              metric={data?.metric ?? ""}
+              fromIso={from}
+              toIso={to}
             />
           )}
         </div>
@@ -856,6 +871,12 @@ function MachineDetailContent() {
           Hover over data points to see exact values
         </p>
       </main>
+
+      <ProvisionDeviceModal
+        open={provisionOpen}
+        machineId={machineId}
+        onClose={() => setProvisionOpen(false)}
+      />
     </div>
   );
 }

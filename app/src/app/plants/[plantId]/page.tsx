@@ -526,7 +526,7 @@ export default function PlantDashboardPage() {
       : "—";
 
   // Group machines by group_name for sectioned rendering
-  const grouped = useMemo(() => {
+  const grouped = (() => {
     const map = new Map<string, Machine[]>();
     for (const m of machines) {
       const key = m.group_name ?? "Ungrouped";
@@ -535,13 +535,12 @@ export default function PlantDashboardPage() {
       else map.set(key, [m]);
     }
     // Sort: named groups first (alphabetical), "Ungrouped" last
-    const entries = Array.from(map.entries()).sort((a, b) => {
+    return Array.from(map.entries()).sort((a, b) => {
       if (a[0] === "Ungrouped") return 1;
       if (b[0] === "Ungrouped") return -1;
       return a[0].localeCompare(b[0]);
     });
-    return entries;
-  }, [machines]);
+  })();
 
   return (
     <div className="min-h-screen bg-zinc-50 dark:bg-black">

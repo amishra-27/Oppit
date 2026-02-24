@@ -4,7 +4,6 @@ import {
   createContext,
   useContext,
   useState,
-  useEffect,
   useCallback,
   type ReactNode,
 } from "react";
@@ -27,16 +26,12 @@ export function useCompany() {
 }
 
 export function CompanyProvider({ children }: { children: ReactNode }) {
-  const [activeCompanyId, setActiveCompanyIdRaw] = useState<string | null>(null);
-  const [companyVersion, setCompanyVersion] = useState(0);
-
-  useEffect(() => {
-    const stored = localStorage.getItem("active_company_id");
-    if (stored) {
-      setActiveCompanyIdRaw(stored);
-      setCompanyVersion((v) => v + 1);
-    }
-  }, []);
+  const [activeCompanyId, setActiveCompanyIdRaw] = useState<string | null>(
+    () => (typeof window !== "undefined" ? localStorage.getItem("active_company_id") : null)
+  );
+  const [companyVersion, setCompanyVersion] = useState(
+    () => (typeof window !== "undefined" && localStorage.getItem("active_company_id") ? 1 : 0)
+  );
 
   const setActiveCompanyId = useCallback((id: string) => {
     setActiveCompanyIdRaw(id);

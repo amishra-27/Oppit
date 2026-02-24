@@ -4,6 +4,25 @@ import { createClient } from "@/lib/supabase/server";
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
+type RawPlantDailyActivityMetricsRow = {
+  machine_name: string | null;
+  utilization_pct: number | string | null;
+  runtime_hours: number | string | null;
+  stop_count: number | string | null;
+  avg_stop_duration_seconds: number | string | null;
+  rotations_total: number | string | null;
+};
+
+type PlantDailyKpiRow = {
+  machineName: string;
+  date: string;
+  utilization: number;
+  runtimeHours: number;
+  stopCount: number;
+  avgStopDurationSec: number;
+  rotationsTotal: number;
+};
+
 function isUuid(v: string) {
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(v);
 }
@@ -62,12 +81,29 @@ export async function GET(
     );
   }
 
+  const rawRows: RawPlantDailyActivityMetricsRow[] = Array.isArray(data)
+    ? (data as RawPlantDailyActivityMetricsRow[])
+    : [];
+
+  const rows: PlantDailyKpiRow[] = rawRows.map((row) => {
+    const utilizationPct = Number(row.utilization_pct) || 0;
+    return {
+      machineName: row.machine_name ?? "",
+      date: day,
+      utilization: utilizationPct / 100,
+      runtimeHours: Number(row.runtime_hours) || 0,
+      stopCount: Number(row.stop_count) || 0,
+      avgStopDurationSec: Number(row.avg_stop_duration_seconds) || 0,
+      rotationsTotal: Number(row.rotations_total) || 0,
+    };
+  });
+
   return NextResponse.json(
     {
       plant_id: plantId,
       day,
       tz,
-      machines: data ?? [],
+      rows,
     },
     { headers: { "Cache-Control": "no-store" } }
   );

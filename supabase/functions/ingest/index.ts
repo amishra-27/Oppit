@@ -3,7 +3,7 @@
 // Key resolved from x-machine-key header or Authorization: Bearer <key>.
 // Uses service-role key internally — does NOT rely on RLS.
 
-import { createClient } from "@supabase/supabase-js";
+import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 
 type Metric = "rpm" | "temperature" | "vibration" | "amps";
 
@@ -52,6 +52,24 @@ function extractKey(req: Request): string | null {
   }
 
   return null;
+}
+
+async function touchKeyLastUsed(
+  supabase: SupabaseClient,
+  keyId: string
+) {
+  const { error } = await supabase
+    .from("machine_api_keys")
+    .update({ last_used_at: new Date().toISOString() })
+    .eq("id", keyId);
+
+  if (error) {
+    // Best effort only: observability update should never fail ingestion.
+    console.warn("[ingest] failed to update key last_used_at", {
+      keyId,
+      error: error.message,
+    });
+  }
 }
 
 Deno.serve(async (req) => {
@@ -113,6 +131,7 @@ Deno.serve(async (req) => {
     return json(404, { error: "Machine not found for this API key" });
   }
 
+  const keyId = keyRow.id as string;
   const machineId = machine.id;
   const companyId = machine.company_id;
   const primaryMetric = machine.primary_metric;
@@ -138,6 +157,7 @@ Deno.serve(async (req) => {
     const { error: insErr } = await supabase.from("readings").insert(rows);
     if (insErr)
       return json(500, { error: "Insert failed", details: insErr.message });
+    await touchKeyLastUsed(supabase, keyId);
     return json(200, {
       ok: true,
       inserted: rows.length,
@@ -165,6 +185,7 @@ Deno.serve(async (req) => {
     const { error: insErr } = await supabase.from("readings").insert(rows);
     if (insErr)
       return json(500, { error: "Insert failed", details: insErr.message });
+    await touchKeyLastUsed(supabase, keyId);
     return json(200, {
       ok: true,
       inserted: rows.length,
@@ -185,6 +206,7 @@ Deno.serve(async (req) => {
     const { error: insErr } = await supabase.from("readings").insert([row]);
     if (insErr)
       return json(500, { error: "Insert failed", details: insErr.message });
+    await touchKeyLastUsed(supabase, keyId);
     return json(200, {
       ok: true,
       inserted: 1,
