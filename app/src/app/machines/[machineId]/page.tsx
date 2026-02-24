@@ -609,7 +609,8 @@ function MachineDetailContent() {
 
   // Realtime: trigger refetch on new readings
   const onInsert = useCallback(() => {
-    setRefreshTick(t => t + 1);
+    // Keep the active time window stable during realtime updates.
+    // Revalidate current keys so values update in place without full section flashing.
     mutate(swrKey);
     mutate(metricsKey);
     if (plantId) {
@@ -663,6 +664,7 @@ function MachineDetailContent() {
   const latestPoint = data?.points?.length ? data.points[data.points.length - 1] : null;
   const currentTs = latestPoint?.ts_server ?? null;
   const isFresh = isDataFresh(currentTs);
+  const showMetricsSkeleton = metricsLoading && !metricsData;
   
   // Show 0 when data is stale (stopped), otherwise show latest value
   const displayValue = isFresh ? (latestPoint?.value ?? null) : 0;
@@ -772,7 +774,7 @@ function MachineDetailContent() {
           </h2>
           <MachineMetricsSummary
             data={metricsData?.summary ?? null}
-            isLoading={metricsLoading}
+            isLoading={showMetricsSkeleton}
             error={metricsError ? (metricsError as Error).message : (metricsData?.error ?? null)}
           />
         </div>
@@ -782,7 +784,7 @@ function MachineDetailContent() {
           <h2 className="text-sm font-medium text-zinc-600 dark:text-zinc-300 mb-3">
             Machine State
           </h2>
-          {metricsLoading ? (
+          {showMetricsSkeleton ? (
             <div className="h-8 rounded-md bg-zinc-800 animate-pulse" />
           ) : metricsError || metricsData?.error ? (
             <div className="rounded-xl border border-red-500/20 bg-red-500/5 px-4 py-3 text-sm text-red-400">
