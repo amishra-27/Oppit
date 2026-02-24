@@ -1,7 +1,7 @@
 "use client";
 
 import { useParams, useSearchParams } from "next/navigation";
-import { useState, useCallback, Suspense, useEffect } from "react";
+import { useState, useCallback, Suspense, useEffect, useMemo } from "react";
 import useSWR, { mutate } from "swr";
 import Link from "next/link";
 import { useReadingsRealtime } from "@/app/hooks/useReadingsRealtime";
@@ -561,13 +561,18 @@ function MachineDetailContent() {
 
   const [rangeMinutes, setRangeMinutes] = useState(15);
   const [chartMode, setChartMode] = useState<"time" | "readings">("readings");
-  const [, setRefreshTick] = useState(0);
+  const [refreshTick, setRefreshTick] = useState(0);
+  const [windowBaseMs] = useState(() => Date.now());
   const [provisionOpen, setProvisionOpen] = useState(false);
 
-  // Compute fresh time bounds on each refresh tick
-  const now = new Date();
-  const from = new Date(now.getTime() - rangeMinutes * 60 * 1000).toISOString();
-  const to = now.toISOString();
+  // Keep bounds stable between refresh ticks to avoid SWR key churn on every render.
+  const windowAnchorMs = windowBaseMs + refreshTick * 5000;
+  const { from, to } = useMemo(() => {
+    return {
+      from: new Date(windowAnchorMs - rangeMinutes * 60 * 1000).toISOString(),
+      to: new Date(windowAnchorMs).toISOString(),
+    };
+  }, [windowAnchorMs, rangeMinutes]);
 
   const swrKey = `/api/machines/${machineId}/history?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`;
 

@@ -12,8 +12,12 @@ function isUuid(v: string) {
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(v);
 }
 
+type Body = {
+  deactivateOldKeys?: boolean;
+};
+
 export async function POST(
-  _req: Request,
+  req: Request,
   { params }: { params: Promise<{ machineId: string }> }
 ) {
   const { machineId } = await params;
@@ -24,6 +28,38 @@ export async function POST(
       { status: 400, headers: NO_STORE_HEADERS }
     );
   }
+
+  let body: Body = {};
+  const rawBody = await req.text();
+  if (rawBody.trim() !== "") {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(rawBody);
+    } catch {
+      return NextResponse.json(
+        { error: "Invalid JSON body" },
+        { status: 400, headers: NO_STORE_HEADERS }
+      );
+    }
+
+    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+      return NextResponse.json(
+        { error: "Invalid JSON body" },
+        { status: 400, headers: NO_STORE_HEADERS }
+      );
+    }
+
+    body = parsed as Body;
+  }
+
+  if (body.deactivateOldKeys !== undefined && typeof body.deactivateOldKeys !== "boolean") {
+    return NextResponse.json(
+      { error: "Invalid deactivateOldKeys" },
+      { status: 400, headers: NO_STORE_HEADERS }
+    );
+  }
+
+  const deactivateOldKeys = body.deactivateOldKeys ?? true;
 
   // Session-bound client — enforce auth and RLS checks for the caller.
   const supabase = await createClient();
@@ -123,6 +159,22 @@ export async function POST(
       { error: "Failed to create device key", details: insertError.message },
       { status: 500, headers: NO_STORE_HEADERS }
     );
+  }
+
+  if (deactivateOldKeys) {
+    const { error: deactivateError } = await adminSupabase
+      .from("machine_api_keys")
+      .update({ is_active: false })
+      .eq("machine_id", machineId)
+      .eq("is_active", true)
+      .neq("id", insertedKey.id);
+
+    if (deactivateError) {
+      return NextResponse.json(
+        { error: "Failed to deactivate old keys", details: deactivateError.message },
+        { status: 500, headers: NO_STORE_HEADERS }
+      );
+    }
   }
 
   return NextResponse.json(

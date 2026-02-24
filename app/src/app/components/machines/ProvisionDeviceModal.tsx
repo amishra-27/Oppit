@@ -49,18 +49,24 @@ export default function ProvisionDeviceModal({
 
   if (!open) return null;
 
+  async function requestProvision(deactivateOldKeys: boolean): Promise<ProvisionResult> {
+    const res = await fetch(`/api/machines/${machineId}/provision-key`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ deactivateOldKeys }),
+    });
+    if (!res.ok) {
+      const json = await res.json().catch(() => ({}));
+      throw new Error(json.error ?? `HTTP ${res.status}`);
+    }
+    return (await res.json()) as ProvisionResult;
+  }
+
   async function handleGenerate() {
     setLoading(true);
     setError(null);
     try {
-      const res = await fetch(`/api/machines/${machineId}/provision-key`, {
-        method: "POST",
-      });
-      if (!res.ok) {
-        const json = await res.json().catch(() => ({}));
-        throw new Error(json.error ?? `HTTP ${res.status}`);
-      }
-      const data: ProvisionResult = await res.json();
+      const data = await requestProvision(true);
       setResult(data);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -73,27 +79,7 @@ export default function ProvisionDeviceModal({
     setRotating(true);
     setError(null);
     try {
-      // 1. Generate a new key
-      const provisionRes = await fetch(`/api/machines/${machineId}/provision-key`, {
-        method: "POST",
-      });
-      if (!provisionRes.ok) {
-        const json = await provisionRes.json().catch(() => ({}));
-        throw new Error(json.error ?? `HTTP ${provisionRes.status}`);
-      }
-      const newKey: ProvisionResult = await provisionRes.json();
-
-      // 2. Deactivate all old keys, keeping the new one
-      const deactivateRes = await fetch(`/api/machines/${machineId}/deactivate-old-keys`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ keepKeyId: newKey.keyId }),
-      });
-      if (!deactivateRes.ok) {
-        const json = await deactivateRes.json().catch(() => ({}));
-        throw new Error(json.error ?? `HTTP ${deactivateRes.status}`);
-      }
-
+      const newKey = await requestProvision(true);
       setResult(newKey);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
