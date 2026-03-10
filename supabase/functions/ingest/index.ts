@@ -12,6 +12,11 @@ type IngestBody = {
   machine_id?: string;
   device_ts?: string | null;
   value?: number;
+  revs_in_window?: number;
+  window_ms?: number;
+  revs_total?: number;
+  seq?: number;
+  boot_id?: string;
   points?: Array<{ ts: string; value: number }>;
   readings?: Array<{ metric: Metric; value: number }>;
 };
@@ -194,7 +199,81 @@ Deno.serve(async (req) => {
     });
   }
 
-  // Mode 3: single value
+  // Mode 3: counter payload (preferred over legacy single value when present)
+  const hasCounterFields =
+    body.revs_in_window !== undefined ||
+    body.window_ms !== undefined ||
+    body.revs_total !== undefined ||
+    body.seq !== undefined ||
+    body.boot_id !== undefined;
+
+  if (hasCounterFields) {
+    if (
+      typeof body.revs_in_window !== "number" ||
+      !Number.isFinite(body.revs_in_window) ||
+      body.revs_in_window < 0
+    ) {
+      return json(400, { error: "Invalid revs_in_window (must be a number >= 0)" });
+    }
+
+    if (
+      typeof body.window_ms !== "number" ||
+      !Number.isFinite(body.window_ms) ||
+      body.window_ms <= 0
+    ) {
+      return json(400, { error: "Invalid window_ms (must be a number > 0)" });
+    }
+
+    if (body.revs_total !== undefined) {
+      if (
+        typeof body.revs_total !== "number" ||
+        !Number.isFinite(body.revs_total) ||
+        body.revs_total < 0
+      ) {
+        return json(400, { error: "Invalid revs_total (must be a number >= 0)" });
+      }
+    }
+
+    if (body.seq !== undefined) {
+      if (
+        typeof body.seq !== "number" ||
+        !Number.isFinite(body.seq) ||
+        body.seq < 0
+      ) {
+        return json(400, { error: "Invalid seq (must be a number >= 0)" });
+      }
+    }
+
+    if (body.boot_id !== undefined && typeof body.boot_id !== "string") {
+      return json(400, { error: "Invalid boot_id (must be a string)" });
+    }
+
+    const rpmDerived = (body.revs_in_window / body.window_ms) * 60000;
+    const row = {
+      machine_id: machineId,
+      ts_device: body.device_ts ?? null,
+      metric: primaryMetric,
+      value: rpmDerived,
+      revs_in_window: body.revs_in_window,
+      window_ms: body.window_ms,
+      revs_total: body.revs_total ?? null,
+      ingest_seq: body.seq ?? null,
+      ingest_boot_id: body.boot_id ?? null,
+    };
+
+    const { error: insErr } = await supabase.from("readings").insert([row]);
+    if (insErr)
+      return json(500, { error: "Insert failed", details: insErr.message });
+    await touchKeyLastUsed(supabase, keyId);
+    return json(200, {
+      ok: true,
+      inserted: 1,
+      machine_id: machineId,
+      company_id: companyId,
+    });
+  }
+
+  // Mode 4: single value
   if (typeof body.value === "number") {
     const row = {
       machine_id: machineId,
@@ -215,5 +294,5 @@ Deno.serve(async (req) => {
     });
   }
 
-  return json(400, { error: "Provide points[], readings[], or value" });
+  return json(400, { error: "Provide points[], readings[], value, or counter fields" });
 });

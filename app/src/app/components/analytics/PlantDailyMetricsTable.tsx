@@ -45,7 +45,7 @@ const COLUMNS: { key: SortField; label: string; align: "left" | "right" }[] = [
   { key: "runtimeHours", label: "Runtime", align: "right" },
   { key: "stopCount", label: "Stops", align: "right" },
   { key: "avgStopDurationSec", label: "Avg Stop", align: "right" },
-  { key: "rotationsTotal", label: "Rotations", align: "right" },
+  { key: "rotationsTotal", label: "Stitches (Revs)", align: "right" },
 ];
 
 // ── Format helpers ──

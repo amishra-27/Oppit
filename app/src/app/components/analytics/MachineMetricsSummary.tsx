@@ -3,7 +3,7 @@
 // ── Types ──
 
 export type MetricsSummaryData = {
-  /** Total rotations (sum of rpm readings × interval). */
+  /** Total stitches / revolutions (exact count from revolution counters when available). */
   rotationsTotal: number;
   /** Utilization as a fraction 0–1 (runtime / total time in range). */
   utilization: number;
@@ -13,6 +13,10 @@ export type MetricsSummaryData = {
   stopCount: number;
   /** Average stop duration in seconds. */
   avgStopDurationSec: number;
+  /** Average RPM while machine was running. */
+  avgRpmRunning: number;
+  /** Average RPM across entire time range (including stopped). */
+  avgRpmAll: number;
 };
 
 interface MachineMetricsSummaryProps {
@@ -36,6 +40,10 @@ function fmtPercent(frac: number): string {
 function fmtHours(h: number): string {
   if (h < 1) return `${Math.round(h * 60)}m`;
   return `${h.toFixed(1)}h`;
+}
+
+function fmtRpm(n: number): string {
+  return `${n.toFixed(1)} RPM`;
 }
 
 function fmtDuration(sec: number): string {
@@ -90,8 +98,8 @@ function Tile({
 
 function Skeleton() {
   return (
-    <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3">
-      {Array.from({ length: 5 }).map((_, i) => (
+    <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-3">
+      {Array.from({ length: 7 }).map((_, i) => (
         <div
           key={i}
           className="rounded-xl border border-zinc-800 bg-zinc-900/80 p-4 animate-pulse"
@@ -134,11 +142,11 @@ export default function MachineMetricsSummary({
   }
 
   return (
-    <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3">
+    <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-3">
       <Tile
-        label="Rotations"
+        label="Stitches (Revs)"
         value={fmtNumber(data.rotationsTotal)}
-        subtitle="Total in range"
+        subtitle="Exact total from revolution counters"
         accent="cyan"
       />
       <Tile
@@ -164,6 +172,18 @@ export default function MachineMetricsSummary({
         value={data.stopCount > 0 ? fmtDuration(data.avgStopDurationSec) : "—"}
         subtitle="Mean downtime"
         accent={data.stopCount > 0 ? "red" : "zinc"}
+      />
+      <Tile
+        label="Avg RPM (Running)"
+        value={fmtRpm(data.avgRpmRunning)}
+        subtitle="While machine on"
+        accent="cyan"
+      />
+      <Tile
+        label="Avg RPM (All Time)"
+        value={fmtRpm(data.avgRpmAll)}
+        subtitle="Entire range"
+        accent="zinc"
       />
     </div>
   );

@@ -10,6 +10,7 @@ import type { MetricsSummaryData } from "@/app/components/analytics/MachineMetri
 import MachineStateTimeline from "@/app/components/analytics/MachineStateTimeline";
 import type { TimelineSegment } from "@/app/lib/analytics/types";
 import ProvisionDeviceModal from "@/app/components/machines/ProvisionDeviceModal";
+import RpmTrendComparisonCard from "@/app/components/analytics/RpmTrendComparisonCard";
 
 type HistoryPoint = { ts_server: string; value: number };
 
@@ -46,8 +47,19 @@ const TIME_RANGES = [
   { label: "15m", minutes: 15 },
   { label: "1h", minutes: 60 },
   { label: "6h", minutes: 360 },
-  { label: "24h", minutes: 1440 },
+  { label: "1d", minutes: 1440 },
+  { label: "1w", minutes: 10080 },
 ] as const;
+
+type RpmTrendResponse = {
+  machine_id: string;
+  to: string;
+  short_window: { avg_rpm_running: number; avg_rpm_all: number; rotations_total: number; runtime_hours: number };
+  long_window: { avg_rpm_running: number; avg_rpm_all: number; rotations_total: number; runtime_hours: number };
+  delta_pct_running: number | null;
+  trend: "up" | "flat" | "down" | "insufficient_data";
+  error?: string;
+};
 
 const FRESHNESS_SECONDS = 120; // Match server config
 
@@ -565,19 +577,35 @@ function MachineDetailContent() {
   const [windowBaseMs] = useState(() => Date.now());
   const [provisionOpen, setProvisionOpen] = useState(false);
 
+  // ── Custom range mode ──
+  const [isCustomRange, setIsCustomRange] = useState(false);
+  const [customFrom, setCustomFrom] = useState("");
+  const [customTo, setCustomTo] = useState("");
+  const [appliedCustomFrom, setAppliedCustomFrom] = useState<string | null>(null);
+  const [appliedCustomTo, setAppliedCustomTo] = useState<string | null>(null);
+
   // Keep bounds stable between refresh ticks to avoid SWR key churn on every render.
   const windowAnchorMs = windowBaseMs + refreshTick * 5000;
   const { from, to } = useMemo(() => {
+    if (isCustomRange && appliedCustomFrom && appliedCustomTo) {
+      return {
+        from: new Date(appliedCustomFrom).toISOString(),
+        to: new Date(appliedCustomTo).toISOString(),
+      };
+    }
     return {
       from: new Date(windowAnchorMs - rangeMinutes * 60 * 1000).toISOString(),
       to: new Date(windowAnchorMs).toISOString(),
     };
-  }, [windowAnchorMs, rangeMinutes]);
+  }, [windowAnchorMs, rangeMinutes, isCustomRange, appliedCustomFrom, appliedCustomTo]);
+
+  // Whether this is a live auto-rolling window (not custom)
+  const isLiveWindow = !isCustomRange;
 
   const swrKey = `/api/machines/${machineId}/history?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`;
 
   const { data, error, isLoading } = useSWR<HistoryResponse>(swrKey, fetcher, {
-    refreshInterval: 5000,
+    refreshInterval: isLiveWindow ? 5000 : 0,
     revalidateOnFocus: true,
     revalidateOnReconnect: true,
     keepPreviousData: true,
@@ -592,20 +620,34 @@ function MachineDetailContent() {
     error: metricsError,
     isLoading: metricsLoading,
   } = useSWR<MetricsResponse>(metricsKey, fetcher, {
-    refreshInterval: 5000,
+    refreshInterval: isLiveWindow ? 5000 : 0,
     revalidateOnFocus: true,
     revalidateOnReconnect: true,
     keepPreviousData: true,
     dedupingInterval: 0,
   });
 
-  // Force time bounds to update on each poll
+  // ── RPM Trend SWR ──
+  const rpmTrendKey = `/api/machines/${machineId}/rpm-trend?to=${encodeURIComponent(to)}`;
+
+  const {
+    data: rpmTrendData,
+    error: rpmTrendError,
+    isLoading: rpmTrendLoading,
+  } = useSWR<RpmTrendResponse>(rpmTrendKey, fetcher, {
+    refreshInterval: isLiveWindow ? 10_000 : 0,
+    revalidateOnFocus: true,
+    keepPreviousData: true,
+  });
+
+  // Force time bounds to update on each poll (only for preset/live mode)
   useEffect(() => {
+    if (!isLiveWindow) return;
     const interval = setInterval(() => {
       setRefreshTick(t => t + 1);
     }, 5000);
     return () => clearInterval(interval);
-  }, []);
+  }, [isLiveWindow]);
 
   // Realtime: trigger refetch on new readings
   const onInsert = useCallback(() => {
@@ -613,10 +655,11 @@ function MachineDetailContent() {
     // Revalidate current keys so values update in place without full section flashing.
     mutate(swrKey);
     mutate(metricsKey);
+    mutate(rpmTrendKey);
     if (plantId) {
       mutate(`/api/plants/${plantId}/cards`);
     }
-  }, [swrKey, metricsKey, plantId]);
+  }, [swrKey, metricsKey, rpmTrendKey, plantId]);
 
   const realtimeStatus = useReadingsRealtime(machineId, onInsert);
 
@@ -769,13 +812,33 @@ function MachineDetailContent() {
 
         {/* Metrics Summary */}
         <div className="mb-6">
-          <h2 className="text-sm font-medium text-zinc-600 dark:text-zinc-300 mb-3">
+          <h2 className="text-sm font-medium text-zinc-600 dark:text-zinc-300 mb-1">
             Performance Summary
           </h2>
+          <p className="text-[11px] text-zinc-500 mb-3">
+            Stitches/rotations are exact device revolution totals when available. RPM is derived server-side from counter windows.
+          </p>
           <MachineMetricsSummary
             data={metricsData?.summary ?? null}
             isLoading={showMetricsSkeleton}
             error={metricsError ? (metricsError as Error).message : (metricsData?.error ?? null)}
+          />
+        </div>
+
+        {/* RPM Trend Comparison */}
+        <div className="mb-6">
+          <h2 className="text-sm font-medium text-zinc-600 dark:text-zinc-300 mb-3">
+            RPM Trend
+          </h2>
+          <RpmTrendComparisonCard
+            shortAvgRpmRunning={rpmTrendData?.short_window.avg_rpm_running ?? null}
+            longAvgRpmRunning={rpmTrendData?.long_window.avg_rpm_running ?? null}
+            deltaPctRunning={rpmTrendData?.delta_pct_running ?? null}
+            trend={rpmTrendData?.trend ?? "insufficient_data"}
+            isLoading={rpmTrendLoading && !rpmTrendData}
+            error={rpmTrendError ? (rpmTrendError as Error).message : (rpmTrendData?.error ?? null)}
+            shortLabel="1 hr"
+            longLabel="7 day"
           />
         </div>
 
@@ -833,19 +896,20 @@ function MachineDetailContent() {
               </button>
             </div>
           </div>
-          
-          {/* Time range selector - only show for timeline mode */}
-          {chartMode === "time" && (
+
+          {/* Time range selector */}
+          <div className="flex items-center gap-2 flex-wrap">
             <div className="flex gap-1 bg-zinc-100 dark:bg-zinc-800 p-1 rounded-lg">
               {TIME_RANGES.map((r) => (
                 <button
                   key={r.label}
                   onClick={() => {
+                    setIsCustomRange(false);
                     setRangeMinutes(r.minutes);
                     setRefreshTick(t => t + 1);
                   }}
                   className={`px-3 py-1.5 rounded-md text-sm font-medium transition-all ${
-                    rangeMinutes === r.minutes
+                    !isCustomRange && rangeMinutes === r.minutes
                       ? "bg-white dark:bg-zinc-700 text-zinc-900 dark:text-zinc-100 shadow-sm"
                       : "text-zinc-500 dark:text-zinc-400 hover:text-zinc-700 dark:hover:text-zinc-200"
                   }`}
@@ -853,9 +917,55 @@ function MachineDetailContent() {
                   {r.label}
                 </button>
               ))}
+              <button
+                onClick={() => setIsCustomRange(true)}
+                className={`px-3 py-1.5 rounded-md text-sm font-medium transition-all ${
+                  isCustomRange
+                    ? "bg-white dark:bg-zinc-700 text-zinc-900 dark:text-zinc-100 shadow-sm"
+                    : "text-zinc-500 dark:text-zinc-400 hover:text-zinc-700 dark:hover:text-zinc-200"
+                }`}
+              >
+                Custom
+              </button>
             </div>
-          )}
+          </div>
         </div>
+
+        {/* Custom range inputs */}
+        {isCustomRange && (
+          <div className="flex items-end gap-2 mb-4 flex-wrap">
+            <div>
+              <label className="block text-[11px] text-zinc-500 mb-1">From</label>
+              <input
+                type="datetime-local"
+                value={customFrom}
+                onChange={(e) => setCustomFrom(e.target.value)}
+                className="rounded-md border border-zinc-700 bg-zinc-800/60 px-2.5 py-1.5 text-sm text-zinc-200 focus:outline-none focus:ring-2 focus:ring-emerald-500/40 focus:border-emerald-500/40 transition-colors [color-scheme:dark]"
+              />
+            </div>
+            <div>
+              <label className="block text-[11px] text-zinc-500 mb-1">To</label>
+              <input
+                type="datetime-local"
+                value={customTo}
+                onChange={(e) => setCustomTo(e.target.value)}
+                className="rounded-md border border-zinc-700 bg-zinc-800/60 px-2.5 py-1.5 text-sm text-zinc-200 focus:outline-none focus:ring-2 focus:ring-emerald-500/40 focus:border-emerald-500/40 transition-colors [color-scheme:dark]"
+              />
+            </div>
+            <button
+              onClick={() => {
+                if (customFrom && customTo) {
+                  setAppliedCustomFrom(customFrom);
+                  setAppliedCustomTo(customTo);
+                }
+              }}
+              disabled={!customFrom || !customTo}
+              className="rounded-lg bg-emerald-600 hover:bg-emerald-500 px-4 py-1.5 text-sm font-medium text-white disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+            >
+              Apply
+            </button>
+          </div>
+        )}
 
         {/* Chart */}
         <div className="rounded-2xl border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 p-6">

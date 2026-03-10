@@ -229,27 +229,42 @@ export type Database = {
       readings: {
         Row: {
           id: number
+          ingest_boot_id: string | null
+          ingest_seq: number | null
           machine_id: string
           metric: string
+          revs_in_window: number | null
+          revs_total: number | null
           ts_device: string | null
           ts_server: string
           value: number
+          window_ms: number | null
         }
         Insert: {
           id?: number
+          ingest_boot_id?: string | null
+          ingest_seq?: number | null
           machine_id: string
           metric: string
+          revs_in_window?: number | null
+          revs_total?: number | null
           ts_device?: string | null
           ts_server?: string
           value: number
+          window_ms?: number | null
         }
         Update: {
           id?: number
+          ingest_boot_id?: string | null
+          ingest_seq?: number | null
           machine_id?: string
           metric?: string
+          revs_in_window?: number | null
+          revs_total?: number | null
           ts_device?: string | null
           ts_server?: string
           value?: number
+          window_ms?: number | null
         }
         Relationships: [
           {

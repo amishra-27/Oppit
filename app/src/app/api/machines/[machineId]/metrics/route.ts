@@ -6,6 +6,8 @@ export const dynamic = "force-dynamic";
 
 type RawMachineActivityRow = {
   rotations_total: number | string | null;
+  active_seconds: number | string | null;
+  idle_seconds: number | string | null;
   utilization_pct: number | string | null;
   runtime_hours: number | string | null;
   stop_count: number | string | null;
@@ -14,6 +16,8 @@ type RawMachineActivityRow = {
 
 type MachineActivitySummary = {
   rotationsTotal: number;
+  avgRpmRunning: number;
+  avgRpmAll: number;
   utilization: number;
   runtimeHours: number;
   stopCount: number;
@@ -123,13 +127,22 @@ export async function GET(
     : ((activityResult.data ?? null) as RawMachineActivityRow | null);
 
   const summary: MachineActivitySummary | null = rawActivity
-    ? {
-        rotationsTotal: Number(rawActivity.rotations_total) || 0,
-        utilization: (Number(rawActivity.utilization_pct) || 0) / 100,
-        runtimeHours: Number(rawActivity.runtime_hours) || 0,
-        stopCount: Number(rawActivity.stop_count) || 0,
-        avgStopDurationSec: Number(rawActivity.avg_stop_duration_seconds) || 0,
-      }
+    ? (() => {
+        const rotationsTotal = Number(rawActivity.rotations_total) || 0;
+        const activeSeconds = Number(rawActivity.active_seconds) || 0;
+        const idleSeconds = Number(rawActivity.idle_seconds) || 0;
+        const coveredSeconds = activeSeconds + idleSeconds;
+
+        return {
+          rotationsTotal,
+          avgRpmRunning: activeSeconds > 0 ? (rotationsTotal * 60) / activeSeconds : 0,
+          avgRpmAll: coveredSeconds > 0 ? (rotationsTotal * 60) / coveredSeconds : 0,
+          utilization: (Number(rawActivity.utilization_pct) || 0) / 100,
+          runtimeHours: Number(rawActivity.runtime_hours) || 0,
+          stopCount: Number(rawActivity.stop_count) || 0,
+          avgStopDurationSec: Number(rawActivity.avg_stop_duration_seconds) || 0,
+        };
+      })()
     : null;
 
   const rawTimelineRows: RawMachineTimelineRow[] = Array.isArray(timelineResult.data)
