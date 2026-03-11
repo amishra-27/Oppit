@@ -6,6 +6,7 @@ export const dynamic = "force-dynamic";
 
 type Metric = "rpm" | "temperature" | "vibration" | "amps";
 const METRICS: Metric[] = ["rpm", "temperature", "vibration", "amps"];
+type HistoryPoint = { ts_server: string; value: number };
 
 function isUuid(v: string) {
   // Lenient UUID check - allows any hex in variant position
@@ -16,6 +17,33 @@ function parseIsoOrNull(v: string | null) {
   if (!v) return null;
   const d = new Date(v);
   return Number.isNaN(d.getTime()) ? null : d;
+}
+
+function parsePositiveIntOrNull(v: string | null): number | null {
+  if (!v || !/^\d+$/.test(v)) return null;
+  const n = Number(v);
+  if (!Number.isInteger(n) || n <= 0) return null;
+  return n;
+}
+
+function defaultMaxPointsForWindow(windowMs: number): number {
+  if (windowMs <= 60 * 60 * 1000) return 600;
+  if (windowMs <= 24 * 60 * 60 * 1000) return 1200;
+  return 1600;
+}
+
+function downsamplePoints(points: HistoryPoint[], maxPoints: number): HistoryPoint[] {
+  const total = points.length;
+  if (maxPoints >= total) return points;
+  if (maxPoints === 1) return [points[0]];
+  if (maxPoints === 2) return [points[0], points[total - 1]];
+
+  const sampled: HistoryPoint[] = [];
+  for (let i = 0; i < maxPoints; i++) {
+    const idx = Math.floor((i * (total - 1)) / (maxPoints - 1));
+    sampled.push(points[idx]);
+  }
+  return sampled;
 }
 
 export async function GET(
@@ -32,6 +60,7 @@ export async function GET(
   const metricParam = url.searchParams.get("metric");
   const fromParam = url.searchParams.get("from");
   const toParam = url.searchParams.get("to");
+  const maxPointsParam = url.searchParams.get("max_points");
 
   // Use session-bound client — RLS enforces tenancy
   const supabase = await createClient();
@@ -55,6 +84,16 @@ export async function GET(
   if (from > to) {
     return NextResponse.json({ error: "`from` must be <= `to`" }, { status: 400 });
   }
+
+  const windowMs = to.getTime() - from.getTime();
+  const parsedMaxPoints = parsePositiveIntOrNull(maxPointsParam);
+  if (maxPointsParam !== null && parsedMaxPoints === null) {
+    return NextResponse.json(
+      { error: "Invalid max_points (must be a positive integer)" },
+      { status: 400 }
+    );
+  }
+  const maxPoints = parsedMaxPoints ?? defaultMaxPointsForWindow(windowMs);
 
   let metric: Metric | null = null;
 
@@ -101,13 +140,22 @@ export async function GET(
     );
   }
 
+  const allPoints: HistoryPoint[] = Array.isArray(data) ? (data as HistoryPoint[]) : [];
+  const points = downsamplePoints(allPoints, maxPoints);
+  const totalPoints = allPoints.length;
+  const returnedPoints = points.length;
+  const downsampled = returnedPoints < totalPoints;
+
   return NextResponse.json(
     {
       machine_id: machineId,
       metric,
       from: from.toISOString(),
       to: to.toISOString(),
-      points: data ?? [],
+      points,
+      total_points: totalPoints,
+      returned_points: returnedPoints,
+      downsampled,
     },
     { headers: { "Cache-Control": "no-store" } }
   );

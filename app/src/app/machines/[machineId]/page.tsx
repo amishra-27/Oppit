@@ -1,7 +1,7 @@
 "use client";
 
 import { useParams, useSearchParams } from "next/navigation";
-import { useState, useCallback, Suspense, useEffect, useMemo } from "react";
+import { useState, useCallback, Suspense, useEffect, useMemo, useRef } from "react";
 import useSWR, { mutate } from "swr";
 import Link from "next/link";
 import { useReadingsRealtime } from "@/app/hooks/useReadingsRealtime";
@@ -29,6 +29,9 @@ type HistoryResponse = {
   from: string;
   to: string;
   points: HistoryPoint[];
+  total_points?: number;
+  returned_points?: number;
+  downsampled?: boolean;
   error?: string;
 };
 
@@ -602,7 +605,10 @@ function MachineDetailContent() {
   // Whether this is a live auto-rolling window (not custom)
   const isLiveWindow = !isCustomRange;
 
-  const swrKey = `/api/machines/${machineId}/history?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`;
+  // Downsample long ranges for chart readability
+  const maxPoints = rangeMinutes <= 60 ? 600 : rangeMinutes <= 1440 ? 1200 : 1600;
+
+  const swrKey = `/api/machines/${machineId}/history?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}&max_points=${maxPoints}`;
 
   const { data, error, isLoading } = useSWR<HistoryResponse>(swrKey, fetcher, {
     refreshInterval: isLiveWindow ? 5000 : 0,
@@ -649,15 +655,27 @@ function MachineDetailContent() {
     return () => clearInterval(interval);
   }, [isLiveWindow]);
 
-  // Realtime: trigger refetch on new readings
+  // Throttled realtime revalidation to reduce per-second UI blinking
+  const lastHistoryMutateRef = useRef(0);
+  const lastMetricsMutateRef = useRef(0);
+
   const onInsert = useCallback(() => {
-    // Keep the active time window stable during realtime updates.
-    // Revalidate current keys so values update in place without full section flashing.
-    mutate(swrKey);
-    mutate(metricsKey);
-    mutate(rpmTrendKey);
-    if (plantId) {
-      mutate(`/api/plants/${plantId}/cards`);
+    const now = Date.now();
+
+    // History: at most every ~2s
+    if (now - lastHistoryMutateRef.current >= 2000) {
+      lastHistoryMutateRef.current = now;
+      mutate(swrKey);
+    }
+
+    // Metrics + timeline + RPM trend: at most every ~5s
+    if (now - lastMetricsMutateRef.current >= 5000) {
+      lastMetricsMutateRef.current = now;
+      mutate(metricsKey);
+      mutate(rpmTrendKey);
+      if (plantId) {
+        mutate(`/api/plants/${plantId}/cards`);
+      }
     }
   }, [swrKey, metricsKey, rpmTrendKey, plantId]);
 
@@ -985,7 +1003,9 @@ function MachineDetailContent() {
         
         {/* Hover hint */}
         <p className="text-xs text-zinc-400 dark:text-zinc-500 mt-2 text-center">
-          Hover over data points to see exact values
+          {data?.downsampled
+            ? `Showing ${data.returned_points?.toLocaleString() ?? ""} sampled points of ${data.total_points?.toLocaleString() ?? ""} for readability`
+            : "Hover over data points to see exact values"}
         </p>
       </main>
 

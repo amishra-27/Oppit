@@ -17,6 +17,18 @@ export type MetricsSummaryData = {
   avgRpmRunning: number;
   /** Average RPM across entire time range (including stopped). */
   avgRpmAll: number;
+  /** Runtime in seconds (preferred over runtimeHours for sub-minute precision). */
+  runtimeSeconds?: number;
+  /** Total idle/stopped seconds in range. */
+  idleSeconds?: number;
+  /** Total seconds covered by data in range. */
+  coveredSeconds?: number;
+  /** Average duration of completed stops only (excludes ongoing). */
+  avgStopDurationCompletedSec?: number;
+  /** Duration of the current ongoing stop in seconds (if stopped now). */
+  currentStopDurationSec?: number;
+  /** Current machine state at end of range. */
+  currentState?: "running" | "stopped";
 };
 
 interface MachineMetricsSummaryProps {
@@ -37,9 +49,16 @@ function fmtPercent(frac: number): string {
   return `${(frac * 100).toFixed(1)}%`;
 }
 
-function fmtHours(h: number): string {
-  if (h < 1) return `${Math.round(h * 60)}m`;
-  return `${h.toFixed(1)}h`;
+function fmtRuntime(sec: number): string {
+  if (sec < 60) return `${Math.round(sec)}s`;
+  if (sec < 3600) {
+    const m = Math.floor(sec / 60);
+    const s = Math.round(sec % 60);
+    return s > 0 ? `${m}m ${s}s` : `${m}m`;
+  }
+  const h = Math.floor(sec / 3600);
+  const m = Math.round((sec % 3600) / 60);
+  return m > 0 ? `${h}h ${m}m` : `${h}h`;
 }
 
 function fmtRpm(n: number): string {
@@ -99,7 +118,7 @@ function Tile({
 function Skeleton() {
   return (
     <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-3">
-      {Array.from({ length: 7 }).map((_, i) => (
+      {Array.from({ length: 8 }).map((_, i) => (
         <div
           key={i}
           className="rounded-xl border border-zinc-800 bg-zinc-900/80 p-4 animate-pulse"
@@ -157,7 +176,7 @@ export default function MachineMetricsSummary({
       />
       <Tile
         label="Runtime"
-        value={fmtHours(data.runtimeHours)}
+        value={fmtRuntime(data.runtimeSeconds ?? data.runtimeHours * 3600)}
         subtitle="Total running"
         accent="emerald"
       />
@@ -168,10 +187,16 @@ export default function MachineMetricsSummary({
         accent={data.stopCount > 0 ? "amber" : "zinc"}
       />
       <Tile
-        label="Avg Stop"
-        value={data.stopCount > 0 ? fmtDuration(data.avgStopDurationSec) : "—"}
-        subtitle="Mean downtime"
+        label="Avg Stop (Completed)"
+        value={data.stopCount > 0 ? fmtDuration(data.avgStopDurationCompletedSec ?? data.avgStopDurationSec) : "—"}
+        subtitle="Mean completed downtime"
         accent={data.stopCount > 0 ? "red" : "zinc"}
+      />
+      <Tile
+        label="Current Stop"
+        value={data.currentState === "stopped" && data.currentStopDurationSec != null ? fmtDuration(data.currentStopDurationSec) : "—"}
+        subtitle={data.currentState === "stopped" ? "Ongoing" : "Machine running"}
+        accent={data.currentState === "stopped" ? "amber" : "zinc"}
       />
       <Tile
         label="Avg RPM (Running)"

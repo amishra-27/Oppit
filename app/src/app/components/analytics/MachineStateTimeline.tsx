@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import type { TimelineSegment, TimelineStatus } from "@/app/lib/analytics/types";
 
 // ── Helpers ──
@@ -50,6 +50,70 @@ const STATUS_CONFIG: Record<
   },
 };
 
+// ── Normalized segment after clamping/merging ──
+
+type NormalizedSegment = {
+  status: TimelineStatus;
+  fromMs: number;
+  toMs: number;
+  durationSec: number;
+  machineName: string;
+  machineId: string;
+  /** Stable key for React rendering */
+  key: string;
+};
+
+function normalizeSegments(
+  raw: TimelineSegment[],
+  rangeStartMs: number,
+  rangeEndMs: number
+): NormalizedSegment[] {
+  const totalMs = rangeEndMs - rangeStartMs;
+  if (totalMs <= 0) return [];
+
+  // Sort by start time
+  const sorted = [...raw].sort(
+    (a, b) => new Date(a.from).getTime() - new Date(b.from).getTime()
+  );
+
+  // Clamp to range and drop invalid/zero-duration
+  const clamped: NormalizedSegment[] = [];
+  for (const seg of sorted) {
+    const fromMs = Math.max(new Date(seg.from).getTime(), rangeStartMs);
+    const toMs = Math.min(new Date(seg.to).getTime(), rangeEndMs);
+    if (toMs <= fromMs) continue;
+    clamped.push({
+      status: seg.status,
+      fromMs,
+      toMs,
+      durationSec: (toMs - fromMs) / 1000,
+      machineName: seg.machineName,
+      machineId: seg.machineId,
+      key: "", // filled after merge
+    });
+  }
+
+  // Merge adjacent same-status segments
+  const merged: NormalizedSegment[] = [];
+  for (const seg of clamped) {
+    const prev = merged[merged.length - 1];
+    if (prev && prev.status === seg.status && prev.toMs >= seg.fromMs) {
+      // Extend previous segment
+      prev.toMs = Math.max(prev.toMs, seg.toMs);
+      prev.durationSec = (prev.toMs - prev.fromMs) / 1000;
+    } else {
+      merged.push({ ...seg });
+    }
+  }
+
+  // Assign stable keys
+  for (const seg of merged) {
+    seg.key = `${seg.status}-${seg.fromMs}-${seg.toMs}`;
+  }
+
+  return merged;
+}
+
 // ── Tooltip ──
 
 function Tooltip({
@@ -57,13 +121,12 @@ function Tooltip({
   anchorRect,
   containerRect,
 }: {
-  segment: TimelineSegment;
+  segment: NormalizedSegment;
   anchorRect: DOMRect;
   containerRect: DOMRect;
 }) {
   const cfg = STATUS_CONFIG[segment.status];
 
-  // Position tooltip centered above the hovered segment
   const left = anchorRect.left - containerRect.left + anchorRect.width / 2;
   const top = anchorRect.top - containerRect.top - 8;
 
@@ -84,7 +147,8 @@ function Tooltip({
           </span>
         </div>
         <p className="text-zinc-500">
-          {formatTime(segment.from)} — {formatTime(segment.to)}
+          {formatTime(new Date(segment.fromMs).toISOString())} —{" "}
+          {formatTime(new Date(segment.toMs).toISOString())}
         </p>
       </div>
       {/* Arrow */}
@@ -115,16 +179,21 @@ export default function MachineStateTimeline({
   showLabel = true,
 }: MachineStateTimelineProps) {
   const [hovered, setHovered] = useState<{
-    segment: TimelineSegment;
+    segment: NormalizedSegment;
     rect: DOMRect;
   } | null>(null);
   const [containerRect, setContainerRect] = useState<DOMRect | null>(null);
 
-  const rangeStart = new Date(from).getTime();
-  const rangeEnd = new Date(to).getTime();
-  const totalMs = rangeEnd - rangeStart;
+  const rangeStartMs = new Date(from).getTime();
+  const rangeEndMs = new Date(to).getTime();
+  const totalMs = rangeEndMs - rangeStartMs;
 
-  if (totalMs <= 0 || segments.length === 0) {
+  const normalized = useMemo(
+    () => normalizeSegments(segments, rangeStartMs, rangeEndMs),
+    [segments, rangeStartMs, rangeEndMs]
+  );
+
+  if (totalMs <= 0 || normalized.length === 0) {
     return (
       <div className="rounded-xl border border-zinc-800 bg-zinc-900/80 p-4 text-center">
         <p className="text-xs text-zinc-500">No timeline data available.</p>
@@ -132,7 +201,14 @@ export default function MachineStateTimeline({
     );
   }
 
-  const machineName = segments[0]?.machineName ?? "Machine";
+  const machineName = normalized[0].machineName;
+
+  // Collect which statuses are present for the legend
+  const presentStatuses = useMemo(() => {
+    const set = new Set<TimelineStatus>();
+    for (const seg of normalized) set.add(seg.status);
+    return set;
+  }, [normalized]);
 
   return (
     <div className="rounded-xl border border-zinc-800 bg-zinc-900/80 p-4">
@@ -146,9 +222,8 @@ export default function MachineStateTimeline({
         <div className="flex items-center gap-3 ml-auto">
           {(["running", "stopped", "stale", "no_data"] as TimelineStatus[]).map(
             (s) => {
+              if (!presentStatuses.has(s)) return null;
               const cfg = STATUS_CONFIG[s];
-              const hasStatus = segments.some((seg) => seg.status === s);
-              if (!hasStatus) return null;
               return (
                 <span
                   key={s}
@@ -165,9 +240,9 @@ export default function MachineStateTimeline({
         </div>
       </div>
 
-      {/* Timeline bar */}
+      {/* Timeline bar — absolute positioning for stable layout */}
       <div
-        className="relative flex h-8 rounded-lg overflow-hidden bg-zinc-800/60"
+        className="relative h-8 rounded-lg overflow-hidden bg-zinc-800/60"
         ref={(el) => {
           if (el && !containerRect) {
             setContainerRect(el.getBoundingClientRect());
@@ -175,23 +250,25 @@ export default function MachineStateTimeline({
         }}
         onMouseLeave={() => setHovered(null)}
       >
-        {segments.map((seg, i) => {
-          const segStart = new Date(seg.from).getTime();
-          const segEnd = new Date(seg.to).getTime();
-          const widthPct = ((segEnd - segStart) / totalMs) * 100;
+        {normalized.map((seg) => {
+          const leftPct = ((seg.fromMs - rangeStartMs) / totalMs) * 100;
+          const widthPct = ((seg.toMs - seg.fromMs) / totalMs) * 100;
           const cfg = STATUS_CONFIG[seg.status];
-
-          // Only show inline duration label if segment is wide enough
-          const showInlineLabel = widthPct > 8;
+          const showInlineLabel = widthPct > 12;
 
           return (
             <div
-              key={`${seg.machineId}-${i}`}
-              className={`relative h-full ${cfg.bg} border-r ${cfg.border} last:border-r-0 transition-opacity hover:opacity-90 cursor-default flex items-center justify-center`}
-              style={{ width: `${widthPct}%`, minWidth: widthPct > 0.5 ? 2 : 0 }}
+              key={seg.key}
+              className={`absolute top-0 h-full ${cfg.bg} border-r ${cfg.border} last:border-r-0 transition-opacity hover:opacity-90 cursor-default flex items-center justify-center`}
+              style={{
+                left: `${leftPct}%`,
+                width: `${widthPct}%`,
+                minWidth: widthPct > 0.5 ? 2 : 0,
+              }}
               onMouseEnter={(e) => {
                 const rect = e.currentTarget.getBoundingClientRect();
-                const parent = e.currentTarget.parentElement?.getBoundingClientRect();
+                const parent =
+                  e.currentTarget.parentElement?.getBoundingClientRect();
                 if (parent) setContainerRect(parent);
                 setHovered({ segment: seg, rect });
               }}

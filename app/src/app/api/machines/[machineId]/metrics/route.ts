@@ -3,6 +3,7 @@ import { createClient } from "@/lib/supabase/server";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+const FRESHNESS_SECONDS = 120;
 
 type RawMachineActivityRow = {
   rotations_total: number | string | null;
@@ -20,8 +21,14 @@ type MachineActivitySummary = {
   avgRpmAll: number;
   utilization: number;
   runtimeHours: number;
+  runtimeSeconds: number;
+  idleSeconds: number;
+  coveredSeconds: number;
   stopCount: number;
   avgStopDurationSec: number;
+  avgStopDurationCompletedSec: number;
+  currentStopDurationSec: number;
+  currentState: "running" | "stopped" | "stale" | "no_data";
 };
 
 type RawMachineTimelineRow = {
@@ -34,10 +41,16 @@ type RawMachineTimelineRow = {
 type MachineTimelineRow = {
   machineId: string;
   machineName: string;
-  status: "running" | "stopped" | "no_data";
+  status: "running" | "stopped" | "stale" | "no_data";
   from: string;
   to: string;
   durationSec: number;
+};
+
+type TimelineSegment = {
+  status: MachineTimelineRow["status"];
+  fromMs: number;
+  toMs: number;
 };
 
 function isUuid(v: string) {
@@ -48,6 +61,83 @@ function parseIsoOrNull(v: string | null) {
   if (!v) return null;
   const d = new Date(v);
   return Number.isNaN(d.getTime()) ? null : d;
+}
+
+function mapTimelineStatus(state: string | null): MachineTimelineRow["status"] {
+  if (state === "active") return "running";
+  if (state === "idle") return "stopped";
+  return "no_data";
+}
+
+function buildTimelineWithStaleCoverage(
+  rawTimelineRows: RawMachineTimelineRow[],
+  machineId: string,
+  machineName: string,
+  fromMs: number,
+  toMs: number
+): MachineTimelineRow[] {
+  const mappedSegments: TimelineSegment[] = rawTimelineRows
+    .map((row) => {
+      const startMs = row.start_ts ? Date.parse(row.start_ts) : Number.NaN;
+      const endMs = row.end_ts ? Date.parse(row.end_ts) : Number.NaN;
+      if (!Number.isFinite(startMs) || !Number.isFinite(endMs)) return null;
+
+      const clampedStart = Math.max(startMs, fromMs);
+      const clampedEnd = Math.min(endMs, toMs);
+      if (clampedEnd <= clampedStart) return null;
+
+      return {
+        status: mapTimelineStatus(row.state),
+        fromMs: clampedStart,
+        toMs: clampedEnd,
+      } as TimelineSegment;
+    })
+    .filter((seg): seg is TimelineSegment => seg !== null)
+    .sort((a, b) => a.fromMs - b.fromMs || a.toMs - b.toMs);
+
+  const withStale: TimelineSegment[] = [];
+  let cursor = fromMs;
+
+  for (const seg of mappedSegments) {
+    if (seg.fromMs > cursor) {
+      withStale.push({ status: "stale", fromMs: cursor, toMs: seg.fromMs });
+    }
+
+    const segStart = Math.max(seg.fromMs, cursor);
+    if (seg.toMs > segStart) {
+      withStale.push({ status: seg.status, fromMs: segStart, toMs: seg.toMs });
+      cursor = Math.max(cursor, seg.toMs);
+    }
+  }
+
+  if (cursor < toMs) {
+    withStale.push({ status: "stale", fromMs: cursor, toMs });
+  }
+
+  const merged: TimelineSegment[] = [];
+  for (const seg of withStale) {
+    if (seg.toMs <= seg.fromMs) continue;
+    const last = merged[merged.length - 1];
+    if (!last) {
+      merged.push(seg);
+      continue;
+    }
+
+    if (last.status === seg.status && last.toMs >= seg.fromMs) {
+      last.toMs = Math.max(last.toMs, seg.toMs);
+    } else {
+      merged.push(seg);
+    }
+  }
+
+  return merged.map((seg) => ({
+    machineId,
+    machineName,
+    status: seg.status,
+    from: new Date(seg.fromMs).toISOString(),
+    to: new Date(seg.toMs).toISOString(),
+    durationSec: Math.max(0, (seg.toMs - seg.fromMs) / 1000),
+  }));
 }
 
 export async function GET(
@@ -89,6 +179,8 @@ export async function GET(
 
   const fromIso = from.toISOString();
   const toIso = to.toISOString();
+  const fromMs = from.getTime();
+  const toMs = to.getTime();
 
   // Call both RPCs in parallel — RLS on readings/machines enforces access
   const [machineResult, activityResult, timelineResult] = await Promise.all([
@@ -126,12 +218,33 @@ export async function GET(
     ? ((activityResult.data[0] ?? null) as RawMachineActivityRow | null)
     : ((activityResult.data ?? null) as RawMachineActivityRow | null);
 
+  const rawTimelineRows: RawMachineTimelineRow[] = Array.isArray(timelineResult.data)
+    ? (timelineResult.data as RawMachineTimelineRow[])
+    : [];
+
+  const timeline = buildTimelineWithStaleCoverage(
+    rawTimelineRows,
+    machineId,
+    machineName,
+    fromMs,
+    toMs
+  );
+
+  const currentState: MachineActivitySummary["currentState"] =
+    timeline.length > 0 ? timeline[timeline.length - 1].status : "no_data";
+  const currentStopDurationSec =
+    currentState === "stopped" && timeline.length > 0
+      ? timeline[timeline.length - 1].durationSec
+      : 0;
+
   const summary: MachineActivitySummary | null = rawActivity
     ? (() => {
         const rotationsTotal = Number(rawActivity.rotations_total) || 0;
         const activeSeconds = Number(rawActivity.active_seconds) || 0;
         const idleSeconds = Number(rawActivity.idle_seconds) || 0;
         const coveredSeconds = activeSeconds + idleSeconds;
+        const avgStopDurationCompletedSec =
+          Number(rawActivity.avg_stop_duration_seconds) || 0;
 
         return {
           rotationsTotal,
@@ -139,35 +252,24 @@ export async function GET(
           avgRpmAll: coveredSeconds > 0 ? (rotationsTotal * 60) / coveredSeconds : 0,
           utilization: (Number(rawActivity.utilization_pct) || 0) / 100,
           runtimeHours: Number(rawActivity.runtime_hours) || 0,
+          runtimeSeconds: activeSeconds,
+          idleSeconds,
+          coveredSeconds,
           stopCount: Number(rawActivity.stop_count) || 0,
-          avgStopDurationSec: Number(rawActivity.avg_stop_duration_seconds) || 0,
+          avgStopDurationSec: avgStopDurationCompletedSec,
+          avgStopDurationCompletedSec,
+          currentStopDurationSec,
+          currentState,
         };
       })()
     : null;
-
-  const rawTimelineRows: RawMachineTimelineRow[] = Array.isArray(timelineResult.data)
-    ? (timelineResult.data as RawMachineTimelineRow[])
-    : [];
-
-  const timeline: MachineTimelineRow[] = rawTimelineRows.map((row) => {
-    const status: MachineTimelineRow["status"] =
-      row.state === "active" ? "running" : row.state === "idle" ? "stopped" : "no_data";
-
-    return {
-      machineId,
-      machineName,
-      status,
-      from: row.start_ts ?? fromIso,
-      to: row.end_ts ?? toIso,
-      durationSec: Number(row.duration_seconds) || 0,
-    };
-  });
 
   return NextResponse.json(
     {
       machine_id: machineId,
       from: fromIso,
       to: toIso,
+      freshnessSeconds: FRESHNESS_SECONDS,
       summary,
       timeline,
     },
